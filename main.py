@@ -289,10 +289,3 @@ async def analyze_image(file: UploadFile = File(...)):
         os.remove(temp_path)
 
     return result
-
-# # =========================
-# # RUN SERVER
-# # =========================
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
