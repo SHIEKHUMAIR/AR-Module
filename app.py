@@ -289,3 +289,4 @@ async def analyze_image(file: UploadFile = File(...)):
         os.remove(temp_path)
 
     return result
+
