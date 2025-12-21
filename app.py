@@ -6,7 +6,8 @@ import os
 import uuid
 import json
 from dotenv import load_dotenv
-from google import genai
+import google.genai as genai
+
 
 # =========================
 # CONFIG
