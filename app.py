@@ -220,6 +220,11 @@ def analyze_with_gemini(image_path: str):
 # =========================
 # API ENDPOINT
 # =========================
+
+@app.get("/")
+def home():
+    return {"status": "AR Object Detector is Running", "docs_url": "/docs"}
+
 import shutil
 import tempfile
 
