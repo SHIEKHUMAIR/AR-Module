@@ -3,23 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 import cv2
 import os
-import uuid
+
 import json
 from dotenv import load_dotenv
 import google.genai as genai
 
-
-# =========================
 # CONFIG
-# =========================
+
 YOLO_CONF_THRESHOLD = 0.65
 YOLO_MODEL_PATH = "./yolo11m.pt"
 
 load_dotenv()
 
-# =========================
 # FASTAPI INIT
-# =========================
 app = FastAPI()
 
 app.add_middleware(
@@ -30,20 +26,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
 # LOAD YOLO
-# =========================
 yolo_model = YOLO(YOLO_MODEL_PATH)
 
-# =========================
 # GEMINI CLIENT (NEW API)
-# =========================
+
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# =========================
 # OBJECT MAP
-# =========================
 object_map = {
     "person": {"chinese": "人", "pinyin": "rén"},
     "bicycle": {"chinese": "自行车", "pinyin": "zìxíngchē"},
@@ -188,7 +179,7 @@ def analyze_with_gemini(image_path: str):
 "text": (
     "Identify the main object in this image and return ONLY valid JSON:\n"
     "{"
-    "\"object\":\"English name\","
+    "\"object\":\"English name (1-2 words)\","
     "\"chinese\":\"Chinese (simplified)\","
     "\"pinyin\":\"Pinyin with tones\","
     "\"sentence\":\"Very simple sentence using easy daily words. "
@@ -197,13 +188,14 @@ def analyze_with_gemini(image_path: str):
     "Use short phrases separated by commas. "
     "No technical or formal words.\""
     "}\n"
-    "Rules:\n"
+    "Strict Rules:\n"
+    "- NEVER return 'Unknown'. If unsure, guess the closest general object names (e.g. 'fruit' instead of 'durian').\n"
+    "- 'object' MUST be the English translation of 'chinese'. They must match.\n"
     "- Use very easy English (like explaining to a child)\n"
     "- For people or animals, do NOT say 'used for'\n"
     "- Do NOT use scientific or technical words\n"
     "- Do NOT mention color, size, or the image\n"
-    "- Keep it practical and simple\n"
-    "- response should be of max 2 lines."
+    "- Keep sentence short (max 2 lines)."
 )
 
 
@@ -228,66 +220,82 @@ def analyze_with_gemini(image_path: str):
 # =========================
 # API ENDPOINT
 # =========================
+import shutil
+import tempfile
+
+
 @app.post("/analyze")
-async def analyze_image(file: UploadFile = File(...)):
-    temp_path = f"temp_{uuid.uuid4().hex}.jpg"
+def analyze_image(file: UploadFile = File(...)):
+    # Create a cleaner temp file that cleans itself up (mostly, though we manually unlink to be sure)
+    # We use delete=False because OpenCV needs to read it from path, and windows sometimes locks opened files.
+    # In Linux/Docker delete=True usually works, but explicit handle is safer x-platform.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
 
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    try:
+        frame = cv2.imread(temp_path)
+        if frame is None:
+             return {"error": "Could not read image"}
 
-    frame = cv2.imread(temp_path)
-    results = yolo_model(frame)
+        results = yolo_model(frame)
 
-    best_conf = 0.0
-    best_label = None
+        best_conf = 0.0
+        best_label = None
 
-    for r in results:
-        for box in r.boxes:
-            conf = float(box.conf[0])
-            if conf > best_conf:
-                best_conf = conf
-                best_label = yolo_model.names[int(box.cls[0])]
+        for r in results:
+            for box in r.boxes:
+                conf = float(box.conf[0])
+                if conf > best_conf:
+                    best_conf = conf
+                    best_label = yolo_model.names[int(box.cls[0])]
 
-    # =========================
-    # DECISION LOGIC
-    # =========================
-    if best_label and best_conf >= YOLO_CONF_THRESHOLD:
-        chinese_info = object_map.get(
-            best_label.lower(),
-            {"chinese": "未知", "pinyin": "---"}
-        )
+        # =========================
+        # DECISION LOGIC
+        # =========================
+        if best_label and best_conf >= YOLO_CONF_THRESHOLD:
+            chinese_info = object_map.get(
+                best_label.lower(),
+                {"chinese": "未知", "pinyin": "---"}
+            )
 
-        sentence = generate_usage_sentence(best_label)
+            sentence = generate_usage_sentence(best_label)
 
-        result = {
-            "object": best_label,
-            "chinese": chinese_info["chinese"],
-            "pinyin": chinese_info["pinyin"],
-            "sentence": sentence,
-            "source": "YOLO + Gemini (Text)"
-        }
-    else:
-        gemini_result = analyze_with_gemini(temp_path)
-
-        label = gemini_result.get("object", "Unknown").lower()
-        chinese_info = object_map.get(
-            label,
-            {
-                "chinese": gemini_result.get("chinese", "未知"),
-                "pinyin": gemini_result.get("pinyin", "---")
+            result = {
+                "object": best_label,
+                "chinese": chinese_info["chinese"],
+                "pinyin": chinese_info["pinyin"],
+                "sentence": sentence,
+                "source": "YOLO + Gemini (Text)"
             }
-        )
+        else:
+            gemini_result = analyze_with_gemini(temp_path)
 
-        result = {
-            "object": label,
-            "chinese": chinese_info["chinese"],
-            "pinyin": chinese_info["pinyin"],
-            "sentence": gemini_result.get("sentence"),
-            "source": "Gemini Vision Fallback"
-        }
+            label = gemini_result.get("object", "Unknown").lower()
+            chinese_info = object_map.get(
+                label,
+                {
+                    "chinese": gemini_result.get("chinese", "未知"),
+                    "pinyin": gemini_result.get("pinyin", "---")
+                }
+            )
 
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+            result = {
+                "object": label,
+                "chinese": chinese_info["chinese"],
+                "pinyin": chinese_info["pinyin"],
+                "sentence": gemini_result.get("sentence"),
+                "source": "Gemini Vision Fallback"
+            }
+            
+        return result
 
-    return result
+    finally:
+        # Cleanup
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
+if __name__ == "__main__":
+    import uvicorn
+    # Hugging Face Spaces defaults to port 7860
+    uvicorn.run(app, host="0.0.0.0", port=7860)
